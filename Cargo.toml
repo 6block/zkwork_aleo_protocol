@@ -1,6 +1,6 @@
 [package]
 name = "zkwork_aleo_protocol"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = [ "The 6block Aleo Team <zk.work@6block.com>" ]
 description = "A protocol lib for aleo pool"

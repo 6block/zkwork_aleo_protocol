@@ -32,3 +32,7 @@ A1(Worker)---C(PoolAgent)---B(Pool)
 A2(Worker)---C2(PoolAgent)---C(PoolAgent)
 A3(Worker)---C2
 ```
+
+## License
+
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](./LICENSE.md)
