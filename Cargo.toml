@@ -1,6 +1,6 @@
 [package]
 name = "zkwork_aleo_protocol"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 authors = [ "The 6block Aleo Team <zk.work@6block.com>" ]
 description = "A protocol lib for aleo pool"
@@ -20,10 +20,10 @@ license = "GPL-3.0"
 
 [dependencies]
 bytes = "1.0.0"
-crossterm = "0.23"
+crossterm = "0.25"
 
   [dependencies.snarkvm]
-  version = "0.8.0"
+  version = "0.9.5"
 
   [dependencies.snarkos]
   version = "2.0.2"
