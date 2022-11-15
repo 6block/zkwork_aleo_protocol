@@ -14,7 +14,6 @@
  // You should have received a copy of the GNU General Public License
  // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
- use snarkos::{network::Data};
  use snarkvm::prelude::*;
 
  use ::bytes::{Buf, BufMut, BytesMut};
@@ -22,7 +21,57 @@
  use std::{default::Default, io::Write};
  use tokio_util::codec::{Decoder, Encoder};
 
+use ::bytes::Bytes;
+use tokio::task;
+
  const MAXIMUM_MESSAGE_SIZE: usize = 512;
+
+ /// This object enables deferred deserialization / ahead-of-time serialization for objects that
+/// take a while to deserialize / serialize, in order to allow these operations to be non-blocking.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Data<T: FromBytes + ToBytes + Send + 'static> {
+    Object(T),
+    Buffer(Bytes),
+}
+
+impl<T: FromBytes + ToBytes + Send + 'static> Data<T> {
+    pub async fn deserialize(self) -> Result<T> {
+        match self {
+            Self::Object(x) => Ok(x),
+            Self::Buffer(bytes) => match task::spawn_blocking(move || T::from_bytes_le(&bytes)).await {
+                Ok(x) => x,
+                Err(err) => Err(err.into()),
+            },
+        }
+    }
+
+    pub fn deserialize_blocking(self) -> Result<T> {
+        match self {
+            Self::Object(x) => Ok(x),
+            Self::Buffer(bytes) => T::from_bytes_le(&bytes),
+        }
+    }
+
+    pub async fn serialize(self) -> Result<Bytes> {
+        match self {
+            Self::Object(x) => match task::spawn_blocking(move || x.to_bytes_le()).await {
+                Ok(bytes) => bytes.map(|vec| vec.into()),
+                Err(err) => Err(err.into()),
+            },
+            Self::Buffer(bytes) => Ok(bytes),
+        }
+    }
+
+    pub fn serialize_blocking_into<W: Write>(&self, writer: &mut W) -> Result<()> {
+        match self {
+            Self::Object(x) => {
+                let bytes = x.to_bytes_le()?;
+                Ok(writer.write_all(&bytes)?)
+            }
+            Self::Buffer(bytes) => Ok(writer.write_all(bytes)?),
+        }
+    }
+}
 
  #[derive(Clone, Debug)]
  pub enum PoolMessageSC<N: Network> {
