@@ -26,7 +26,7 @@ use tokio::task;
 
 const MAXIMUM_MESSAGE_SIZE: usize = 512;
 
- /// This object enables deferred deserialization / ahead-of-time serialization for objects that
+/// This object enables deferred deserialization / ahead-of-time serialization for objects that
 /// take a while to deserialize / serialize, in order to allow these operations to be non-blocking.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Data<T: FromBytes + ToBytes + Send + 'static> {
@@ -38,10 +38,12 @@ impl<T: FromBytes + ToBytes + Send + 'static> Data<T> {
     pub async fn deserialize(self) -> Result<T> {
         match self {
             Self::Object(x) => Ok(x),
-            Self::Buffer(bytes) => match task::spawn_blocking(move || T::from_bytes_le(&bytes)).await {
-                Ok(x) => x,
-                Err(err) => Err(err.into()),
-            },
+            Self::Buffer(bytes) => {
+                match task::spawn_blocking(move || T::from_bytes_le(&bytes)).await {
+                    Ok(x) => x,
+                    Err(err) => Err(err.into()),
+                }
+            }
         }
     }
 
@@ -81,6 +83,8 @@ pub enum PoolMessageSC<N: Network> {
     Notify(u64, u64, EpochChallenge<N>),
     /// ShutDown := ()
     ShutDown,
+    /// Pong
+    Pong,
     /// Unused
     #[allow(unused)]
     Unused,
@@ -100,6 +104,7 @@ impl<N: Network> PoolMessageSC<N> {
             Self::ConnectAck(..) => "ConnectAck",
             Self::Notify(..) => "Notify",
             Self::ShutDown => "Shutdown",
+            Self::Pong => "Pong",
             Self::Unused => "Unused",
         }
     }
@@ -111,7 +116,8 @@ impl<N: Network> PoolMessageSC<N> {
             Self::ConnectAck(..) => 0,
             Self::Notify(..) => 1,
             Self::ShutDown => 2,
-            Self::Unused => 3,
+            Self::Pong => 3,
+            Self::Unused => 127,
         }
     }
 
@@ -143,6 +149,7 @@ impl<N: Network> PoolMessageSC<N> {
                 Ok(())
             }
             Self::ShutDown => Ok(()),
+            Self::Pong => Ok(()),
             Self::Unused => Ok(()),
         }
     }
@@ -174,7 +181,13 @@ impl<N: Network> PoolMessageSC<N> {
                         Some(u32::from_le_bytes([data[33], data[34], data[35], data[36]])),
                         Some(String::from_utf8(data[37..].to_vec())?),
                     ),
-                    _ => return Err(anyhow!("Invalid 'ConnectAck' message: {:?} {:?}", buffer, data)),
+                    _ => {
+                        return Err(anyhow!(
+                            "Invalid 'ConnectAck' message: {:?} {:?}",
+                            buffer,
+                            data
+                        ))
+                    }
                 },
             },
             1 => Self::Notify(
@@ -184,7 +197,17 @@ impl<N: Network> PoolMessageSC<N> {
             ),
             2 => match data.is_empty() {
                 true => Self::ShutDown,
-                false => return Err(anyhow!("Invalid 'ShutDown' message: {:?} {:?}", buffer, data)),
+                false => {
+                    return Err(anyhow!(
+                        "Invalid 'ShutDown' message: {:?} {:?}",
+                        buffer,
+                        data
+                    ))
+                }
+            },
+            3 => match data.is_empty() {
+                true => Self::Pong,
+                false => return Err(anyhow!("Invalid 'Pong' message: {:?} {:?}", buffer, data)),
             },
             _ => return Err(anyhow!("Invalid message ID {}", id)),
         };
@@ -256,6 +279,8 @@ pub enum PoolMessageCS<N: Network> {
     Submit(u32, u64, Data<ProverSolution<N>>),
     /// DisConnect := (id)
     DisConnect(u32),
+    /// Ping
+    Ping,
     // Unused
     #[allow(unused)]
     Unused,
@@ -276,6 +301,7 @@ impl<N: Network> PoolMessageCS<N> {
             Self::Connect(..) => "Connect",
             Self::Submit(..) => "Submit",
             Self::DisConnect(..) => "Disconnect",
+            Self::Ping => "Ping",
             Self::Unused => "Unused",
         }
     }
@@ -286,7 +312,8 @@ impl<N: Network> PoolMessageCS<N> {
             Self::Connect(..) => 128,
             Self::Submit(..) => 129,
             Self::DisConnect(..) => 130,
-            Self::Unused => 131,
+            Self::Ping => 131,
+            Self::Unused => 255,
         }
     }
 
@@ -294,7 +321,15 @@ impl<N: Network> PoolMessageCS<N> {
     #[inline]
     pub fn serialize_data_into<W: Write>(&self, writer: &mut W) -> Result<()> {
         match self {
-            Self::Connect(worker_type, address_type, v_major, v_minor, v_patch, custom_name, address) => {
+            Self::Connect(
+                worker_type,
+                address_type,
+                v_major,
+                v_minor,
+                v_patch,
+                custom_name,
+                address,
+            ) => {
                 writer.write_all(&[*worker_type])?;
                 writer.write_all(&[*address_type])?;
                 writer.write_all(&[*v_major])?;
@@ -317,6 +352,7 @@ impl<N: Network> PoolMessageCS<N> {
                 bincode::serialize_into(&mut *writer, id)?;
                 Ok(())
             }
+            Self::Ping => Ok(()),
             Self::Unused => Ok(()),
         }
     }
@@ -356,6 +392,10 @@ impl<N: Network> PoolMessageCS<N> {
                 Data::Buffer(data[12..].to_vec().into()),
             ),
             130 => Self::DisConnect(bincode::deserialize(data)?),
+            131 => match data.is_empty() {
+                true => Self::Ping,
+                false => return Err(anyhow!("Invalid 'Ping' message: {:?} {:?}", buffer, data)),
+            },
             _ => return Err(anyhow!("Invalid message ID {}", id)),
         };
 
@@ -425,8 +465,6 @@ mod tests {
     use ::rand::thread_rng;
     use snarkvm::prelude::Testnet3;
     type CurrentNetwork = Testnet3;
-    use snarkos_node_ledger::Ledger;
-    type CurrentLedger = Ledger<CurrentNetwork, ConsensusMemory<CurrentNetwork>>;
     // use snarkvm_console_network_environment::Console;
     // type CurrentEnvironment = Console;
     use snarkvm_algorithms::polycommit::kzg10::{KZGCommitment, KZGProof};
@@ -436,7 +474,10 @@ mod tests {
         let mut buffer = BytesMut::new();
         let _ = PoolMessageSC::<CurrentNetwork>::default().encode(message, &mut buffer);
         println!("{:?}", buffer);
-        let message1 = PoolMessageSC::<CurrentNetwork>::default().decode(&mut buffer.clone()).unwrap().unwrap();
+        let message1 = PoolMessageSC::<CurrentNetwork>::default()
+            .decode(&mut buffer.clone())
+            .unwrap()
+            .unwrap();
         println!("{:?}", message1);
         let mut buffer_2 = BytesMut::new();
         let _ = PoolMessageSC::<CurrentNetwork>::default().encode(message1, &mut buffer_2);
@@ -448,7 +489,10 @@ mod tests {
         let mut buffer = BytesMut::new();
         let _ = PoolMessageCS::<CurrentNetwork>::default().encode(message, &mut buffer);
         println!("buffer: {:?}", buffer);
-        let message1 = PoolMessageCS::<CurrentNetwork>::default().decode(&mut buffer.clone()).unwrap().unwrap();
+        let message1 = PoolMessageCS::<CurrentNetwork>::default()
+            .decode(&mut buffer.clone())
+            .unwrap()
+            .unwrap();
         println!("message: {:?}", message1);
         let mut buffer_2 = BytesMut::new();
         let _ = PoolMessageCS::default().encode(message1, &mut buffer_2);
@@ -459,25 +503,30 @@ mod tests {
     #[test]
     fn test_pool_message_sc() -> Result<()> {
         // env
-        let genesis = Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap();
-        let ledger = CurrentLedger::load(Some(genesis), None).unwrap();
         let rng = &mut thread_rng();
         let address = Address::<CurrentNetwork>::new(Uniform::rand(rng));
         println!("{}", address);
 
-        let message =
-            PoolMessageSC::ConnectAck::<CurrentNetwork>(true, address, Some(1), Some(String::from("testsignature")));
+        let message = PoolMessageSC::ConnectAck::<CurrentNetwork>(
+            true,
+            address,
+            Some(1),
+            Some(String::from("testsignature")),
+        );
         check_pool_message_sc(message);
 
         let epoch_challenge = EpochChallenge::new(
-            ledger.latest_epoch_number(),
-            ledger.get_previous_hash(0).unwrap(),
+            0,
+            CurrentNetwork::hash_bhp1024(&[true; 1024])?.into(),
             CurrentNetwork::COINBASE_PUZZLE_DEGREE,
         )?;
         let message = PoolMessageSC::Notify::<CurrentNetwork>(0, 100000, epoch_challenge);
         check_pool_message_sc(message);
 
-        let message = PoolMessageSC::ShutDown::<CurrentNetwork>;
+        let message = PoolMessageSC::ShutDown;
+        check_pool_message_sc(message);
+
+        let message = PoolMessageSC::Pong;
         check_pool_message_sc(message);
 
         Ok(())
@@ -499,12 +548,22 @@ mod tests {
         let rng = &mut thread_rng();
         let address = Address::<CurrentNetwork>::new(Uniform::rand(rng));
         println!("{}", address);
-        let partial_solution = PartialSolution::new(address, u64::rand(rng), KZGCommitment(rng.gen()));
-        let prover_solution = ProverSolution::new(partial_solution, KZGProof { w: rng.gen(), random_v: None });
+        let partial_solution =
+            PartialSolution::new(address, u64::rand(rng), KZGCommitment(rng.gen()));
+        let prover_solution = ProverSolution::new(
+            partial_solution,
+            KZGProof {
+                w: rng.gen(),
+                random_v: None,
+            },
+        );
         let message = PoolMessageCS::Submit::<CurrentNetwork>(0, 0, Data::Object(prover_solution));
         check_pool_message_cs(message);
 
         let message = PoolMessageCS::DisConnect::<CurrentNetwork>(1);
+        check_pool_message_cs(message);
+
+        let message = PoolMessageCS::Ping;
         check_pool_message_cs(message);
         Ok(())
     }

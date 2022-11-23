@@ -1,6 +1,6 @@
 [package]
 name = "zkwork_aleo_protocol"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 authors = [ "The 6block Aleo Team <zk.work@6block.com>" ]
 description = "A protocol lib for aleo pool"
@@ -24,9 +24,6 @@ crossterm = "0.25"
 
   [dependencies.snarkvm]
   version = "0.9.5"
-
-  [dependencies.snarkos]
-  version = "2.0.2"
 
   [dependencies.anyhow]
   version = "1"
@@ -84,6 +81,13 @@ crossterm = "0.25"
   [dependencies.tracing-subscriber]
   version = "0.3"
   features = [ "env-filter", "parking_lot" ]
+
+  [dependencies.rand]
+  version = "0.8"
+  default-features = false
+
+  [dependencies.snarkvm-algorithms]
+  version = "0.9.5"
 
 # [lib]
 # name = "zkwork_aleo_protocolxxx"

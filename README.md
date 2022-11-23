@@ -8,30 +8,29 @@ Zk.Work Aleo Protocol is a set of ore pool protocols designed by 6Block for Aleo
 ### message
 1. connect server
   
-   **<<128,type,v_major,v_minor,v_patch,name>>**
-2. submit block
+   **<<128,worker_type, address_type, v_major, v_minor, v_patch, name_length, name, address>>**
+2. submit solution
 
-   **<<129,id,address,nonce,pre_block_hash,proof>>**
+   **<< 129, worker_id, job_id, prover_solution >>**
 3. disconnect server
    
-   **<<130,id>>**
-4. connect server response
-   
-   **<<0,is_accept,id>>**
-5. notify job
-   
-   **<<1,share_difficulty,block_template>>**
-1. pool shutdown
+   **<< 130, worker_id >>**
 
-   **<<2>>**
-### networking
-```mermaid
-graph LR;
-A(Worker)--- B(Pool)
-A1(Worker)---C(PoolAgent)---B(Pool)
-A2(Worker)---C2(PoolAgent)---C(PoolAgent)
-A3(Worker)---C2
-```
+4. ping
+   
+   **<< 131 >>**
+5. connect server ack
+   
+   **<< 0, is_accept, pool_address, [worker_id], [signature] >>**
+6. notify job
+   
+   **<< 1, job_id, target, epoch_challenge >>**
+7. pool shutdown
+
+   **<< 2 >>**
+8. pong
+    
+    **<< 3 >>**
 
 ## License
 
