@@ -14,73 +14,24 @@
 // You should have received a copy of the GNU General Public License
 // along with the snarkOS library. If not, see <https://www.gnu.org/licenses/>.
 
-use snarkvm::prelude::*;
+use snarkvm::{
+    ledger::narwhal::Data,
+    prelude::{puzzle::Solution, Network, *},
+};
 
 use ::bytes::{Buf, BufMut, BytesMut};
 use anyhow::{anyhow, Result};
 use std::{default::Default, io::Write};
 use tokio_util::codec::{Decoder, Encoder};
 
-use ::bytes::Bytes;
-use tokio::task;
-
 const MAXIMUM_MESSAGE_SIZE: usize = 512;
-
-/// This object enables deferred deserialization / ahead-of-time serialization for objects that
-/// take a while to deserialize / serialize, in order to allow these operations to be non-blocking.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Data<T: FromBytes + ToBytes + Send + 'static> {
-    Object(T),
-    Buffer(Bytes),
-}
-
-impl<T: FromBytes + ToBytes + Send + 'static> Data<T> {
-    pub async fn deserialize(self) -> Result<T> {
-        match self {
-            Self::Object(x) => Ok(x),
-            Self::Buffer(bytes) => {
-                match task::spawn_blocking(move || T::from_bytes_le(&bytes)).await {
-                    Ok(x) => x,
-                    Err(err) => Err(err.into()),
-                }
-            }
-        }
-    }
-
-    pub fn deserialize_blocking(self) -> Result<T> {
-        match self {
-            Self::Object(x) => Ok(x),
-            Self::Buffer(bytes) => T::from_bytes_le(&bytes),
-        }
-    }
-
-    pub async fn serialize(self) -> Result<Bytes> {
-        match self {
-            Self::Object(x) => match task::spawn_blocking(move || x.to_bytes_le()).await {
-                Ok(bytes) => bytes.map(|vec| vec.into()),
-                Err(err) => Err(err.into()),
-            },
-            Self::Buffer(bytes) => Ok(bytes),
-        }
-    }
-
-    pub fn serialize_blocking_into<W: Write>(&self, writer: &mut W) -> Result<()> {
-        match self {
-            Self::Object(x) => {
-                let bytes = x.to_bytes_le()?;
-                Ok(writer.write_all(&bytes)?)
-            }
-            Self::Buffer(bytes) => Ok(writer.write_all(bytes)?),
-        }
-    }
-}
 
 #[derive(Clone, Debug)]
 pub enum PoolMessageSC<N: Network> {
     /// ConnectAck := (is_accecpt, address, [id], [signature])
     ConnectAck(bool, Address<N>, Option<u32>, Option<String>),
     /// Notify := (job_id, target, epoch_challenge)
-    Notify(u64, u64, EpochChallenge<N>),
+    Notify(u64, u64, N::BlockHash),
     /// ShutDown := ()
     ShutDown,
     /// Pong
@@ -142,10 +93,10 @@ impl<N: Network> PoolMessageSC<N> {
                     Ok(())
                 }
             },
-            Self::Notify(job_id, target, epoch_challenge) => {
+            Self::Notify(job_id, target, epoch_hash) => {
                 bincode::serialize_into(&mut *writer, job_id)?;
                 bincode::serialize_into(&mut *writer, target)?;
-                writer.write_all(&epoch_challenge.to_bytes_le()?)?;
+                writer.write_all(&epoch_hash.to_bytes_le()?)?;
                 Ok(())
             }
             Self::ShutDown => Ok(()),
@@ -193,7 +144,7 @@ impl<N: Network> PoolMessageSC<N> {
             1 => Self::Notify(
                 bincode::deserialize(&data[0..8])?,
                 bincode::deserialize(&data[8..16])?,
-                EpochChallenge::read_le(&data[16..])?,
+                N::BlockHash::read_le(&data[16..])?,
             ),
             2 => match data.is_empty() {
                 true => Self::ShutDown,
@@ -275,8 +226,8 @@ impl<N: Network> Decoder for PoolMessageSC<N> {
 pub enum PoolMessageCS<N: Network> {
     /// Connect := (type, address_type, version(major, minor, patch), name, address)
     Connect(u8, u8, u8, u8, u8, String, String),
-    /// submit := (work_id, job_id, address, prover_solution)
-    Submit(u32, u64, Data<ProverSolution<N>>),
+    /// submit := (work_id, job_id, address, solution)
+    Submit(u32, u64, Data<Solution<N>>),
     /// DisConnect := (id)
     DisConnect(u32),
     /// Ping
@@ -343,10 +294,10 @@ impl<N: Network> PoolMessageCS<N> {
                 writer.write_all(address.as_bytes())?;
                 Ok(())
             }
-            Self::Submit(worker_id, job_id, prover_solution) => {
+            Self::Submit(worker_id, job_id, solution) => {
                 bincode::serialize_into(&mut *writer, worker_id)?;
                 bincode::serialize_into(&mut *writer, job_id)?;
-                prover_solution.serialize_blocking_into(writer)
+                solution.serialize_blocking_into(writer)
             }
             Self::DisConnect(id) => {
                 bincode::serialize_into(&mut *writer, id)?;
@@ -463,21 +414,15 @@ impl<N: Network> Decoder for PoolMessageCS<N> {
 mod tests {
     use super::*;
     use ::rand::thread_rng;
-    use snarkvm::prelude::Testnet3;
-    type CurrentNetwork = Testnet3;
-    // use snarkvm_console_network_environment::Console;
-    // type CurrentEnvironment = Console;
-    use snarkvm_algorithms::polycommit::kzg10::{KZGCommitment, KZGProof};
+    use snarkvm::prelude::TestnetV0;
+    type CurrentNetwork = TestnetV0;
 
     fn check_pool_message_sc(message: PoolMessageSC<CurrentNetwork>) {
         println!("{:?}", message);
         let mut buffer = BytesMut::new();
         let _ = PoolMessageSC::<CurrentNetwork>::default().encode(message, &mut buffer);
         println!("{:?}", buffer);
-        let message1 = PoolMessageSC::<CurrentNetwork>::default()
-            .decode(&mut buffer.clone())
-            .unwrap()
-            .unwrap();
+        let message1 = PoolMessageSC::<CurrentNetwork>::default().decode(&mut buffer.clone()).unwrap().unwrap();
         println!("{:?}", message1);
         let mut buffer_2 = BytesMut::new();
         let _ = PoolMessageSC::<CurrentNetwork>::default().encode(message1, &mut buffer_2);
@@ -489,10 +434,7 @@ mod tests {
         let mut buffer = BytesMut::new();
         let _ = PoolMessageCS::<CurrentNetwork>::default().encode(message, &mut buffer);
         println!("buffer: {:?}", buffer);
-        let message1 = PoolMessageCS::<CurrentNetwork>::default()
-            .decode(&mut buffer.clone())
-            .unwrap()
-            .unwrap();
+        let message1 = PoolMessageCS::<CurrentNetwork>::default().decode(&mut buffer.clone()).unwrap().unwrap();
         println!("message: {:?}", message1);
         let mut buffer_2 = BytesMut::new();
         let _ = PoolMessageCS::default().encode(message1, &mut buffer_2);
@@ -503,24 +445,17 @@ mod tests {
     #[test]
     fn test_pool_message_sc() -> Result<()> {
         // env
+        let genesis = Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap();
         let rng = &mut thread_rng();
         let address = Address::<CurrentNetwork>::new(Uniform::rand(rng));
         println!("{}", address);
 
-        let message = PoolMessageSC::ConnectAck::<CurrentNetwork>(
-            true,
-            address,
-            Some(1),
-            Some(String::from("testsignature")),
-        );
+        let message =
+            PoolMessageSC::ConnectAck::<CurrentNetwork>(true, address, Some(1), Some(String::from("testsignature")));
         check_pool_message_sc(message);
 
-        let epoch_challenge = EpochChallenge::new(
-            0,
-            CurrentNetwork::hash_bhp1024(&[true; 1024])?.into(),
-            CurrentNetwork::COINBASE_PUZZLE_DEGREE,
-        )?;
-        let message = PoolMessageSC::Notify::<CurrentNetwork>(0, 100000, epoch_challenge);
+        let epoch_hash = genesis.hash();
+        let message = PoolMessageSC::Notify::<CurrentNetwork>(0, 100000, epoch_hash);
         check_pool_message_sc(message);
 
         let message = PoolMessageSC::ShutDown;
@@ -541,23 +476,16 @@ mod tests {
             1,
             0,
             "my_worker_1".to_string(),
-            "215587407@qq.com".to_string(),
+            "testaddress".to_string(),
         );
         check_pool_message_cs(message);
 
         let rng = &mut thread_rng();
         let address = Address::<CurrentNetwork>::new(Uniform::rand(rng));
         println!("{}", address);
-        let partial_solution =
-            PartialSolution::new(address, u64::rand(rng), KZGCommitment(rng.gen()));
-        let prover_solution = ProverSolution::new(
-            partial_solution,
-            KZGProof {
-                w: rng.gen(),
-                random_v: None,
-            },
-        );
-        let message = PoolMessageCS::Submit::<CurrentNetwork>(0, 0, Data::Object(prover_solution));
+        let genesis = Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap();
+        let solution = Solution::new(genesis.hash(), address, 0).unwrap();
+        let message = PoolMessageCS::Submit::<CurrentNetwork>(0, 0, Data::Object(solution));
         check_pool_message_cs(message);
 
         let message = PoolMessageCS::DisConnect::<CurrentNetwork>(1);

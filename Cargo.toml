@@ -23,11 +23,13 @@ bytes = "1.0.0"
 crossterm = "0.25"
 
   [dependencies.snarkvm]
-  version = "0.9.9"
+  git = "https://github.com/AleoNet/snarkVM.git"
+  rev = "0bd71b5"
+  features = [ "console" ]
 
   [dependencies.anyhow]
   version = "1"
-
+  
   [dependencies.bincode]
   version = "1.0"
 
@@ -85,9 +87,6 @@ crossterm = "0.25"
   [dependencies.rand]
   version = "0.8"
   default-features = false
-
-  [dependencies.snarkvm-algorithms]
-  version = "0.9.5"
 
 # [lib]
 # name = "zkwork_aleo_protocolxxx"
