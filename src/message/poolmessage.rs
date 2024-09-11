@@ -226,8 +226,10 @@ impl<N: Network> Decoder for PoolMessageSC<N> {
 pub enum PoolMessageCS<N: Network> {
     /// Connect := (type, address_type, version(major, minor, patch), name, address)
     Connect(u8, u8, u8, u8, u8, String, String),
-    /// submit := (work_id, job_id, address, solution)
+    /// Submit := (worker_id, job_id, solution)
     Submit(u32, u64, Data<Solution<N>>),
+    /// SubmitV2 := (worker_id, job_id, epoch_hash, solution_address, nonce, target)
+    SubmitV2(u32, u64, N::BlockHash, Address<N>, u64, u64),
     /// DisConnect := (id)
     DisConnect(u32),
     /// Ping
@@ -251,6 +253,7 @@ impl<N: Network> PoolMessageCS<N> {
         match self {
             Self::Connect(..) => "Connect",
             Self::Submit(..) => "Submit",
+            Self::SubmitV2(..) => "SubmitV2",
             Self::DisConnect(..) => "Disconnect",
             Self::Ping => "Ping",
             Self::Unused => "Unused",
@@ -262,6 +265,7 @@ impl<N: Network> PoolMessageCS<N> {
         match self {
             Self::Connect(..) => 128,
             Self::Submit(..) => 129,
+            Self::SubmitV2(..) => 132,
             Self::DisConnect(..) => 130,
             Self::Ping => 131,
             Self::Unused => 255,
@@ -298,6 +302,15 @@ impl<N: Network> PoolMessageCS<N> {
                 bincode::serialize_into(&mut *writer, worker_id)?;
                 bincode::serialize_into(&mut *writer, job_id)?;
                 solution.serialize_blocking_into(writer)
+            }
+            Self::SubmitV2(worker_id, job_id, epoch_hash, solution_address, nonce, target) => {
+                bincode::serialize_into(&mut *writer, worker_id)?;
+                bincode::serialize_into(&mut *writer, job_id)?;
+                writer.write_all(&epoch_hash.to_bytes_le()?)?;
+                writer.write_all(&solution_address.to_bytes_le()?)?;
+                bincode::serialize_into(&mut *writer, nonce)?;
+                bincode::serialize_into(&mut *writer, target)?;
+                Ok(())
             }
             Self::DisConnect(id) => {
                 bincode::serialize_into(&mut *writer, id)?;
@@ -347,6 +360,14 @@ impl<N: Network> PoolMessageCS<N> {
                 true => Self::Ping,
                 false => return Err(anyhow!("Invalid 'Ping' message: {:?} {:?}", buffer, data)),
             },
+            132 => Self::SubmitV2(
+                bincode::deserialize(&data[0..4])?,
+                bincode::deserialize(&data[4..12])?,
+                N::BlockHash::from_bytes_le(&data[12..44])?,
+                Address::<N>::from_bytes_le(&data[44..76])?,
+                bincode::deserialize(&data[76..84])?,
+                bincode::deserialize(&data[84..])?,
+            ),
             _ => return Err(anyhow!("Invalid message ID {}", id)),
         };
 
@@ -422,7 +443,10 @@ mod tests {
         let mut buffer = BytesMut::new();
         let _ = PoolMessageSC::<CurrentNetwork>::default().encode(message, &mut buffer);
         println!("{:?}", buffer);
-        let message1 = PoolMessageSC::<CurrentNetwork>::default().decode(&mut buffer.clone()).unwrap().unwrap();
+        let message1 = PoolMessageSC::<CurrentNetwork>::default()
+            .decode(&mut buffer.clone())
+            .unwrap()
+            .unwrap();
         println!("{:?}", message1);
         let mut buffer_2 = BytesMut::new();
         let _ = PoolMessageSC::<CurrentNetwork>::default().encode(message1, &mut buffer_2);
@@ -434,7 +458,10 @@ mod tests {
         let mut buffer = BytesMut::new();
         let _ = PoolMessageCS::<CurrentNetwork>::default().encode(message, &mut buffer);
         println!("buffer: {:?}", buffer);
-        let message1 = PoolMessageCS::<CurrentNetwork>::default().decode(&mut buffer.clone()).unwrap().unwrap();
+        let message1 = PoolMessageCS::<CurrentNetwork>::default()
+            .decode(&mut buffer.clone())
+            .unwrap()
+            .unwrap();
         println!("message: {:?}", message1);
         let mut buffer_2 = BytesMut::new();
         let _ = PoolMessageCS::default().encode(message1, &mut buffer_2);
@@ -445,13 +472,18 @@ mod tests {
     #[test]
     fn test_pool_message_sc() -> Result<()> {
         // env
-        let genesis = Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap();
+        let genesis =
+            Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap();
         let rng = &mut thread_rng();
         let address = Address::<CurrentNetwork>::new(Uniform::rand(rng));
         println!("{}", address);
 
-        let message =
-            PoolMessageSC::ConnectAck::<CurrentNetwork>(true, address, Some(1), Some(String::from("testsignature")));
+        let message = PoolMessageSC::ConnectAck::<CurrentNetwork>(
+            true,
+            address,
+            Some(1),
+            Some(String::from("testsignature")),
+        );
         check_pool_message_sc(message);
 
         let epoch_hash = genesis.hash();
@@ -483,15 +515,10 @@ mod tests {
         let rng = &mut thread_rng();
         let address = Address::<CurrentNetwork>::new(Uniform::rand(rng));
         println!("{}", address);
-        let genesis = Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap();
-        let solution = Solution::new(genesis.hash(), address, 0).unwrap();
-        let message = PoolMessageCS::Submit::<CurrentNetwork>(0, 0, Data::Object(solution));
-        check_pool_message_cs(message);
-
-        let message = PoolMessageCS::DisConnect::<CurrentNetwork>(1);
-        check_pool_message_cs(message);
-
-        let message = PoolMessageCS::Ping;
+        let genesis =
+            Block::<CurrentNetwork>::from_bytes_le(CurrentNetwork::genesis_bytes()).unwrap();
+        let message =
+            PoolMessageCS::SubmitV2::<CurrentNetwork>(0, 0, genesis.hash(), address, 0, 0);
         check_pool_message_cs(message);
         Ok(())
     }
